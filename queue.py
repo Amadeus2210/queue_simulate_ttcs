@@ -144,9 +144,8 @@ class Customer:
 
 
 class QueueEngine:
-    def __init__(self, model, lam, mu, C=1, K=999, sigma=None):
+    def __init__(self, model, mu, C=1, K=999, sigma=None):
         self.model  = model
-        self.lam    = lam
         self.mu     = mu
         self.C      = C
         self.K      = K
@@ -167,6 +166,13 @@ class QueueEngine:
         self.sum_W         = 0.0
         self.sum_Wq        = 0.0
 
+        self.area_system   = 0.0
+        self.area_queue    = 0.0
+        self.busy_time     = 0.0
+
+        self.last_event_time = time.time()
+        self.start_time      = self.last_event_time
+
     def _service_time(self):
         if self.model in ("M/M/1", "M/M/C", "M/M/1/K"):
             return random.expovariate(self.mu)
@@ -185,9 +191,19 @@ class QueueEngine:
                 return True
         return False
 
+    def _update_time_avg_stats(self, now):
+        dt = now - self.last_event_time
+        n_q = len(self.queue)
+        n_s = sum(1 for s in self.servers if s is not None)
+        self.area_system += (n_q + n_s) * dt
+        self.area_queue  += n_q * dt
+        self.busy_time   += n_s * dt
+        self.last_event_time = now
+
     def add_customer(self):
         now = time.time()
         with self.lock:
+            self._update_time_avg_stats(now)
             in_sys = len(self.queue) + sum(1 for s in self.servers if s is not None)
             if in_sys >= self.K:
                 self.total_balked += 1
@@ -203,7 +219,7 @@ class QueueEngine:
         while self._running:
             now = time.time()
             with self.lock:
-                # complete finished services
+                self._update_time_avg_stats(now)
                 for i, c in enumerate(self.servers):
                     if c is not None and now >= c.finish:
                         self.total_served += 1
@@ -217,7 +233,6 @@ class QueueEngine:
                             nxt.finish = now + svc
                             self.servers[i]     = nxt
                             self.server_free[i] = nxt.finish
-
             time.sleep(0.05)
 
     def start(self):
@@ -239,18 +254,17 @@ class QueueEngine:
             n      = self.total_served
             W_emp  = self.sum_W  / n if n > 0 else 0
             Wq_emp = self.sum_Wq / n if n > 0 else 0
-            L_emp  = self.lam * W_emp  if W_emp  > 0 else n_sys
-            Lq_emp = self.lam * Wq_emp if Wq_emp > 0 else n_q
-
+            elapsed = max(0.001, now - self.start_time)
+            L_emp  = self.area_system / elapsed
+            Lq_emp = self.area_queue / elapsed
+            rho_emp = self.busy_time / (elapsed * self.C)
             finish_times = [max(0, c.finish - now) for c in s_snap if c is not None]
-
             if n_s < self.C:
                 exp_wait = 0.0
             else:
                 sorted_free = sorted(self.server_free)
                 exp_wait = max(0, sorted_free[0] - now) + \
                            len(q_snap) * (1 / self.mu)
-
             return {
                 "now":         now,
                 "queue":       q_snap,
@@ -265,9 +279,125 @@ class QueueEngine:
                 "Wq_emp":      Wq_emp,
                 "L_emp":       L_emp,
                 "Lq_emp":      Lq_emp,
-                "finish_times":finish_times,
-                "exp_wait":    exp_wait,
+                "finish_times": finish_times,
+                "exp_wait":     exp_wait,
+                "rho_emp":      rho_emp,
             }
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  RESULT WINDOW
+# ══════════════════════════════════════════════════════════════════════
+
+def show_results_window(parent, snap, model):
+    win = tk.Toplevel(parent)
+    win.title("Simulation Results")
+    win.configure(bg=BG)
+    win.resizable(False, False)
+    win.grab_set()
+
+    # ── header ────────────────────────────────────────────────────────
+    hdr = tk.Frame(win, bg="#0d0d1a", pady=10)
+    hdr.pack(fill="x")
+    tk.Label(hdr, text="■  SIMULATION STOPPED",
+             bg="#0d0d1a", fg=RED, font=("Consolas", 12, "bold")
+             ).pack(side="left", padx=14)
+    tk.Label(hdr, text=f"Model: {model}",
+             bg="#0d0d1a", fg=MUTED, font=F_BODY
+             ).pack(side="right", padx=14)
+
+    body = tk.Frame(win, bg=BG, padx=20, pady=16)
+    body.pack(fill="both", expand=True)
+
+    # ── metric cards ─────────────────────────────────────────────────
+    metrics_title = tk.Label(body,
+        text="AVERAGE PERFORMANCE METRICS",
+        bg=BG, fg=PURPLE, font=("Consolas", 9, "bold"))
+    metrics_title.pack(anchor="w", pady=(0, 8))
+
+    cards_frame = tk.Frame(body, bg=BG)
+    cards_frame.pack(fill="x", pady=(0, 14))
+
+    rho = snap["rho_emp"]
+    L   = snap["L_emp"]
+    Lq  = snap["Lq_emp"]
+    W   = snap["W_emp"]
+    Wq  = snap["Wq_emp"]
+
+    def fmt(v):
+        if math.isinf(v): return "∞"
+        if v >= 10000:    return f"{v:,.0f}"
+        if v >= 100:      return f"{v:.1f}"
+        return f"{v:.4f}"
+
+    metric_cards = [
+        ("ρ",  "Utilisation",        fmt(rho),       CYAN,   "Server busy fraction"),
+        ("L",  "Avg in System",      fmt(L),          GREEN,  "Customers in system"),
+        ("Lq", "Avg in Queue",       fmt(Lq),         YELLOW, "Customers waiting"),
+        ("W",  "Avg System Time",    f"{fmt(W)} s",   ORANGE, "Time per customer"),
+        ("Wq", "Avg Wait Time",      f"{fmt(Wq)} s",  RED,    "Queue wait per customer"),
+    ]
+
+    for i, (sym, label, val, color, desc) in enumerate(metric_cards):
+        card = tk.Frame(cards_frame, bg=CARD, padx=14, pady=12,
+                        highlightthickness=1, highlightbackground=color)
+        card.grid(row=0, column=i, padx=5, sticky="ew")
+        cards_frame.grid_columnconfigure(i, weight=1)
+
+        tk.Label(card, text=sym, bg=CARD, fg=color,
+                 font=("Consolas", 20, "bold")).pack()
+        tk.Label(card, text=label, bg=CARD, fg=MUTED,
+                 font=("Segoe UI", 8)).pack()
+        tk.Label(card, text=val, bg="#0a0a1a", fg=color,
+                 font=("Consolas", 14, "bold"),
+                 pady=6, padx=8, width=10).pack(fill="x", pady=(6, 2))
+        tk.Label(card, text=desc, bg=CARD, fg=MUTED,
+                 font=("Segoe UI", 7)).pack()
+
+    # ── traffic summary ───────────────────────────────────────────────
+    sep = tk.Frame(body, bg=BORDER, height=1)
+    sep.pack(fill="x", pady=(4, 12))
+
+    tk.Label(body, text="TRAFFIC SUMMARY",
+             bg=BG, fg=PURPLE, font=("Consolas", 9, "bold")
+             ).pack(anchor="w", pady=(0, 8))
+
+    stats_frame = tk.Frame(body, bg=PANEL, padx=16, pady=12)
+    stats_frame.pack(fill="x")
+
+    stats = [
+        ("Customers arrived",  str(snap["total_arr"]),  TEXT),
+        ("Customers served",   str(snap["total_svc"]),  GREEN),
+        ("Customers balked",   str(snap["total_balk"]), RED),
+        ("In system at stop",  str(snap["n_system"]),   YELLOW),
+    ]
+
+    for col, (lbl, val, color) in enumerate(stats):
+        fr = tk.Frame(stats_frame, bg=PANEL)
+        fr.grid(row=0, column=col, padx=20, sticky="w")
+        stats_frame.grid_columnconfigure(col, weight=1)
+        tk.Label(fr, text=lbl, bg=PANEL, fg=MUTED,
+                 font=("Segoe UI", 8)).pack(anchor="w")
+        tk.Label(fr, text=val, bg=PANEL, fg=color,
+                 font=("Consolas", 18, "bold")).pack(anchor="w")
+
+    # ── close button ─────────────────────────────────────────────────
+    tk.Button(body, text="✕  Close",
+              command=win.destroy,
+              bg=CARD, fg=TEXT, font=F_HEAD,
+              activebackground=BORDER,
+              relief="flat", bd=0, pady=10, cursor="hand2"
+              ).pack(fill="x", pady=(16, 0))
+
+    # centre on parent
+    win.update_idletasks()
+    pw = parent.winfo_width()
+    ph = parent.winfo_height()
+    px = parent.winfo_x()
+    py = parent.winfo_y()
+    ww = win.winfo_width()
+    wh = win.winfo_height()
+    win.geometry(f"+{px + (pw - ww)//2}+{py + (ph - wh)//2}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -301,7 +431,6 @@ class App(tk.Tk):
 
     # ──────────────────────────── UI ──────────────────────────────────
     def _build_ui(self):
-        # title bar
         bar = tk.Frame(self, bg="#0d0d1a", pady=6)
         bar.pack(fill="x")
         tk.Label(bar, text="⬡  Queueing ModelSim  –  Live Simulator",
@@ -312,14 +441,11 @@ class App(tk.Tk):
         root.grid_columnconfigure(1, weight=1)
         root.grid_rowconfigure(1, weight=1)
 
-        # ── LEFT COLUMN ──────────────────────────────────────────────
         left = tk.Frame(root, bg=BG)
         left.grid(row=0, column=0, rowspan=3, sticky="ns", padx=(0, 10))
 
-        # model selector
         mf = tk.LabelFrame(left, text=" Model ", bg=PANEL, fg=PURPLE,
-                           font=F_HEAD, bd=1, relief="groove",
-                           padx=8, pady=8)
+                           font=F_HEAD, bd=1, relief="groove", padx=8, pady=8)
         mf.pack(fill="x", pady=(0, 8))
         for m in self.MODELS:
             tk.Radiobutton(mf, text=m, variable=self._selected, value=m,
@@ -329,23 +455,19 @@ class App(tk.Tk):
                            cursor="hand2",
                            command=self._on_model_change).pack(fill="x", pady=3)
 
-        # parameters
         inf = tk.LabelFrame(left, text=" Parameters ", bg=PANEL, fg=PURPLE,
-                            font=F_HEAD, bd=1, relief="groove",
-                            padx=10, pady=8)
+                            font=F_HEAD, bd=1, relief="groove", padx=10, pady=8)
         inf.pack(fill="x", pady=(0, 8))
         self._entries = {}
         self._elabels = {}
         fields = [
-            ("Arrival rate λ  :", "lam",   "2"),
             ("Service rate μ  :", "mu",    "3"),
             ("Servers C       :", "C",     "2"),
             ("Capacity K      :", "K",     "10"),
             ("Std-dev σ (svc) :", "sigma", ""),
         ]
         for i, (lbl, key, dflt) in enumerate(fields):
-            l = tk.Label(inf, text=lbl, bg=PANEL, fg=MUTED,
-                         font=F_BODY, anchor="w")
+            l = tk.Label(inf, text=lbl, bg=PANEL, fg=MUTED, font=F_BODY, anchor="w")
             l.grid(row=i, column=0, sticky="w", pady=3, padx=(0, 6))
             self._elabels[key] = l
             e = tk.Entry(inf, font=F_MONO, width=7, bg="#0d0d1a", fg=CYAN,
@@ -357,7 +479,6 @@ class App(tk.Tk):
             self._entries[key] = e
         inf.grid_columnconfigure(1, weight=1)
 
-        # control buttons
         cf = tk.Frame(left, bg=BG)
         cf.pack(fill="x", pady=(0, 6))
         self._start_btn = tk.Button(cf, text="▶  Start",
@@ -377,9 +498,7 @@ class App(tk.Tk):
                   bg="#2c2c2c", fg=MUTED, font=F_HEAD,
                   relief="flat", bd=0, pady=9, cursor="hand2").pack(fill="x")
 
-        # ── TOP RIGHT: metrics ────────────────────────────────────────
-        mc = tk.LabelFrame(root,
-                           text=" Performance Metrics  ( Theoretical  ↑  |  Empirical  ↓ ) ",
+        mc = tk.LabelFrame(root, text=" Live Queue Metrics ",
                            bg=PANEL, fg=PURPLE, font=F_HEAD,
                            bd=1, relief="groove", padx=10, pady=8)
         mc.grid(row=0, column=1, sticky="ew", pady=(0, 8))
@@ -397,57 +516,39 @@ class App(tk.Tk):
             cell = tk.Frame(mc, bg=CARD, padx=8, pady=6)
             cell.grid(row=0, column=col, padx=5, pady=2, sticky="ew")
             mc.grid_columnconfigure(col, weight=1)
-
             tk.Label(cell, text=sym,  bg=CARD, fg=CYAN,
                      font=("Consolas", 14, "bold")).pack()
-            tk.Label(cell, text=desc, bg=CARD, fg=MUTED,
-                     font=F_SMALL).pack()
-
-            vt = tk.StringVar(value="—")
-            tk.Label(cell, textvariable=vt, bg="#0a0a1a", fg=YELLOW,
-                     font=F_HEAD, width=9, pady=3).pack(fill="x", pady=(3, 0))
-
+            tk.Label(cell, text=desc, bg=CARD, fg=MUTED, font=F_SMALL).pack()
             ve = tk.StringVar(value="—")
             tk.Label(cell, textvariable=ve, bg="#0a1a0a", fg=GREEN,
                      font=F_HEAD, width=9, pady=3).pack(fill="x", pady=(2, 0))
+            self._m_emp[key] = ve
 
-            self._m_theory[key] = vt
-            self._m_emp[key]    = ve
-
-        # ── MIDDLE RIGHT: queue display ───────────────────────────────
         qf = tk.LabelFrame(root, text=" Live Queue ",
                            bg=PANEL, fg=PURPLE, font=F_HEAD,
                            bd=1, relief="groove", padx=10, pady=8)
         qf.grid(row=1, column=1, sticky="nsew", pady=(0, 8))
 
-        # server lane
         self._server_frame = tk.Frame(qf, bg=PANEL)
         self._server_frame.pack(fill="x", pady=(0, 8))
         self._server_labels = []
 
-        # queue scroll area
-        tk.Label(qf, text="Waiting in queue:", bg=PANEL, fg=MUTED,
-                 font=F_BODY).pack(anchor="w")
+        tk.Label(qf, text="Waiting in queue:", bg=PANEL, fg=MUTED, font=F_BODY).pack(anchor="w")
 
         q_wrap = tk.Frame(qf, bg=PANEL)
         q_wrap.pack(fill="both", expand=True)
 
-        self._qcanvas = tk.Canvas(q_wrap, bg="#0d0d1a",
-                                  height=120, highlightthickness=0)
-        vsb = tk.Scrollbar(q_wrap, orient="vertical",
-                           command=self._qcanvas.yview)
+        self._qcanvas = tk.Canvas(q_wrap, bg="#0d0d1a", height=120, highlightthickness=0)
+        vsb = tk.Scrollbar(q_wrap, orient="vertical", command=self._qcanvas.yview)
         self._qcanvas.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
         self._qcanvas.pack(side="left", fill="both", expand=True)
 
         self._q_inner = tk.Frame(self._qcanvas, bg="#0d0d1a")
-        self._q_win   = self._qcanvas.create_window(
-            (0, 0), window=self._q_inner, anchor="nw")
+        self._q_win   = self._qcanvas.create_window((0, 0), window=self._q_inner, anchor="nw")
         self._q_inner.bind("<Configure>",
-            lambda e: self._qcanvas.configure(
-                scrollregion=self._qcanvas.bbox("all")))
+            lambda e: self._qcanvas.configure(scrollregion=self._qcanvas.bbox("all")))
 
-        # add customer button
         tk.Button(qf, text="➕  Add Customer Manually",
                   command=self._add_manual,
                   bg=ORANGE, fg=TEXT, font=F_HEAD,
@@ -455,42 +556,38 @@ class App(tk.Tk):
                   relief="flat", bd=0, pady=10, cursor="hand2"
                   ).pack(fill="x", pady=(8, 0))
 
-        # ── BOTTOM RIGHT: info bar ────────────────────────────────────
         ib = tk.Frame(root, bg=PANEL, padx=10, pady=8)
         ib.grid(row=2, column=1, sticky="ew")
 
         self._info_vars = {}
         info_defs = [
-            ("Arrived",                 "arr",    TEXT),
-            ("Served",                  "svc",    GREEN),
-            ("Balked",                  "balk",   RED),
-            ("In System",               "nsys",   YELLOW),
-            ("Next server free in",     "nxtfin", CYAN),
-            ("Your order done in",      "ordone", ORANGE),
-            ("Est. wait if join now",   "wait",   ORANGE),
+            ("Arrived",               "arr",    TEXT),
+            ("Served",                "svc",    GREEN),
+            ("Balked",                "balk",   RED),
+            ("In System",             "nsys",   YELLOW),
+            ("Next server free in",   "nxtfin", CYAN),
+            ("Your order done in",    "ordone", ORANGE),
+            ("Est. wait if join now", "wait",   ORANGE),
         ]
         for col, (lbl, key, color) in enumerate(info_defs):
             fr = tk.Frame(ib, bg=PANEL)
             fr.grid(row=0, column=col, padx=8, sticky="w")
             ib.grid_columnconfigure(col, weight=1)
-            tk.Label(fr, text=lbl, bg=PANEL, fg=MUTED,
-                     font=F_SMALL).pack(anchor="w")
+            tk.Label(fr, text=lbl, bg=PANEL, fg=MUTED, font=F_SMALL).pack(anchor="w")
             v = tk.StringVar(value="—")
             tk.Label(fr, textvariable=v, bg=PANEL, fg=color,
                      font=("Consolas", 10, "bold")).pack(anchor="w")
             self._info_vars[key] = v
 
-    # ── field visibility ──────────────────────────────────────────────
     def _on_model_change(self):
         model = self._selected.get()
         vis = {
-            "M/M/1":   {"lam", "mu"},
-            "M/M/C":   {"lam", "mu", "C"},
-            "M/G/1":   {"lam", "mu", "sigma"},
-            "M/G/C":   {"lam", "mu", "C", "sigma"},
-            "M/M/1/K": {"lam", "mu", "K"},
+            "M/M/1":   {"mu"},
+            "M/M/C":   {"mu", "C"},
+            "M/G/1":   {"mu", "sigma"},
+            "M/G/C":   {"mu", "C", "sigma"},
+            "M/M/1/K": {"mu", "K"},
         }.get(model, {"lam", "mu"})
-
         for key, e in self._entries.items():
             lbl = self._elabels[key]
             if key in vis:
@@ -502,12 +599,9 @@ class App(tk.Tk):
                 e.delete(0, "end")
                 e.grid_remove()
                 lbl.grid_remove()
+        for v in self._m_emp.values():
+            v.set("—")
 
-        for d in (self._m_theory, self._m_emp):
-            for v in d.values():
-                v.set("—")
-
-    # ── server lane rebuild ───────────────────────────────────────────
     def _rebuild_servers(self, C):
         for w in self._server_frame.winfo_children():
             w.destroy()
@@ -518,14 +612,11 @@ class App(tk.Tk):
         for i in range(C):
             fr = tk.Frame(self._server_frame, bg=CARD, padx=6, pady=4)
             fr.grid(row=0, column=i + 1, padx=4)
-            tk.Label(fr, text=f"S{i+1}", bg=CARD, fg=MUTED,
-                     font=F_SMALL).pack()
-            lbl = tk.Label(fr, text="idle", bg=CARD, fg=MUTED,
-                           font=F_HEAD, width=10, pady=3)
+            tk.Label(fr, text=f"S{i+1}", bg=CARD, fg=MUTED, font=F_SMALL).pack()
+            lbl = tk.Label(fr, text="idle", bg=CARD, fg=MUTED, font=F_HEAD, width=10, pady=3)
             lbl.pack()
             self._server_labels.append(lbl)
 
-    # ── parse ─────────────────────────────────────────────────────────
     def _pf(self, key, default=None):
         try:
             s = self._entries[key].get().strip()
@@ -543,17 +634,13 @@ class App(tk.Tk):
         except Exception:
             return default
 
-    # ── start / stop ─────────────────────────────────────────────────
     def _start_sim(self):
         model = self._selected.get()
-        lam   = self._pf("lam")
         mu    = self._pf("mu")
         C     = self._pi("C", 1)
         K     = self._pi("K", 999)
         sigma = self._pf("sigma", None)
 
-        if not lam or lam <= 0:
-            messagebox.showerror("Input", "λ phải > 0"); return
         if not mu or mu <= 0:
             messagebox.showerror("Input", "μ phải > 0"); return
         if model in ("M/M/C", "M/G/C") and (not C or C < 1):
@@ -567,40 +654,31 @@ class App(tk.Tk):
         Customer._id = 0
         c_val = C if C else 1
         k_val = K if K else 999
-        self._engine = QueueEngine(model, lam, mu,
-                                   C=c_val, K=k_val, sigma=sigma)
+        self._engine = QueueEngine(model, mu, C=c_val, K=k_val, sigma=sigma)
         self._engine.start()
         self._running = True
         self._start_btn.config(state="disabled")
         self._stop_btn.config(state="normal")
         self._rebuild_servers(c_val)
 
-        # theoretical metrics
-        m = compute_metrics(model, lam, mu,
-                            C=c_val, K=k_val if k_val < 999 else 10,
-                            sigma=sigma)
-        if m:
-            for key, var in self._m_theory.items():
-                val = m.get(key)
-                var.set("∞" if math.isinf(val) else fmt(val))
-
     def _stop_sim(self):
         if self._engine:
             self._engine.stop()
+            snap  = self._engine.snapshot()
+            model = self._selected.get()
+            show_results_window(self, snap, model)
+
         self._running = False
         self._start_btn.config(state="normal")
         self._stop_btn.config(state="disabled")
 
-    # ── manual add ────────────────────────────────────────────────────
     def _add_manual(self):
         if not self._engine:
             messagebox.showinfo("Info", "Khởi động simulation trước."); return
         _, status = self._engine.add_customer()
         if status == "balked":
-            messagebox.showwarning("Hàng đợi đầy",
-                                   "Hệ thống đầy – khách rời đi (balked)!")
+            messagebox.showwarning("Hàng đợi đầy", "Hệ thống đầy – khách rời đi (balked)!")
 
-    # ── polling ───────────────────────────────────────────────────────
     def _poll(self):
         if self._running and self._engine:
             try:
@@ -612,8 +690,6 @@ class App(tk.Tk):
 
     def _update_ui(self, snap):
         now = snap["now"]
-
-        # info bar
         self._info_vars["arr"].set(str(snap["total_arr"]))
         self._info_vars["svc"].set(str(snap["total_svc"]))
         self._info_vars["balk"].set(str(snap["total_balk"]))
@@ -623,7 +699,6 @@ class App(tk.Tk):
         if ft:
             nxt = min(ft)
             self._info_vars["nxtfin"].set(f"{nxt:.2f}s")
-            # expected time until a new order placed NOW is complete
             exp_finish = snap["exp_wait"] + (1 / self._engine.mu)
             self._info_vars["ordone"].set(f"{exp_finish:.2f}s")
         else:
@@ -632,16 +707,13 @@ class App(tk.Tk):
 
         self._info_vars["wait"].set(f"{snap['exp_wait']:.2f}s")
 
-        # empirical metrics
-        C   = self._engine.C
-        rho = snap["n_servers"] / C if C > 0 else 0
+        rho = snap["rho_emp"]
         self._m_emp["rho"].set(fmt(rho))
         self._m_emp["L"].set(fmt(snap["L_emp"]))
         self._m_emp["Lq"].set(fmt(snap["Lq_emp"]))
         self._m_emp["W"].set(fmt(snap["W_emp"]))
         self._m_emp["Wq"].set(fmt(snap["Wq_emp"]))
 
-        # server labels
         for i, c in enumerate(snap["servers"]):
             if i >= len(self._server_labels):
                 break
@@ -652,136 +724,52 @@ class App(tk.Tk):
                 rem = max(0, c.finish - now)
                 lbl.config(text=f"#{c.id}  {rem:.1f}s", fg=GREEN, bg="#0a2a0a")
 
-        # ───────────────── queue rows ─────────────────
         queue_data = snap["queue"]
-
-        # tạo thêm rows nếu thiếu
         while len(self._queue_rows) < len(queue_data):
-
-            row = tk.Frame(
-                self._q_inner,
-                bg="#0d1520",
-                pady=2,
-                padx=4
-            )
-
-            pos_lbl = tk.Label(
-                row,
-                bg=PURPLE,
-                fg=TEXT,
-                font=("Consolas", 9, "bold"),
-                width=3
-            )
+            row = tk.Frame(self._q_inner, bg="#0d1520", pady=2, padx=4)
+            pos_lbl  = tk.Label(row, bg=PURPLE, fg=TEXT, font=("Consolas", 9, "bold"), width=3)
             pos_lbl.pack(side="left", padx=(0, 6))
-
-            cust_lbl = tk.Label(
-                row,
-                bg="#0d1520",
-                fg=TEXT,
-                font=F_MONO,
-                width=14
-            )
+            cust_lbl = tk.Label(row, bg="#0d1520", fg=TEXT, font=F_MONO, width=14)
             cust_lbl.pack(side="left")
-
-            wait_lbl = tk.Label(
-                row,
-                bg="#0d1520",
-                fg=YELLOW,
-                font=F_MONO,
-                width=14
-            )
+            wait_lbl = tk.Label(row, bg="#0d1520", fg=YELLOW, font=F_MONO, width=14)
             wait_lbl.pack(side="left")
-
-            est_lbl = tk.Label(
-                row,
-                bg="#0d1520",
-                fg=ORANGE,
-                font=F_MONO,
-                width=18
-            )
+            est_lbl  = tk.Label(row, bg="#0d1520", fg=ORANGE, font=F_MONO, width=18)
             est_lbl.pack(side="left")
-
-            done_lbl = tk.Label(
-                row,
-                bg="#0d1520",
-                fg=CYAN,
-                font=F_MONO
-            )
+            done_lbl = tk.Label(row, bg="#0d1520", fg=CYAN, font=F_MONO)
             done_lbl.pack(side="left")
-
             row.pack(fill="x", padx=2, pady=1)
-
             self._queue_rows.append({
-                "frame": row,
-                "pos": pos_lbl,
-                "cust": cust_lbl,
-                "wait": wait_lbl,
-                "est": est_lbl,
-                "done": done_lbl
+                "frame": row, "pos": pos_lbl, "cust": cust_lbl,
+                "wait": wait_lbl, "est": est_lbl, "done": done_lbl
             })
 
-        # update rows
         avg_svc = 1 / self._engine.mu
-
         for i, row_data in enumerate(self._queue_rows):
-
             if i >= len(queue_data):
                 row_data["frame"].pack_forget()
                 continue
-
             row_data["frame"].pack(fill="x", padx=2, pady=1)
-
             c = queue_data[i]
-
-            waited = now - c.arrival
-
+            waited   = now - c.arrival
             base_wait = min(ft) if ft else avg_svc
             est_wait  = base_wait + (i * avg_svc / self._engine.C)
             est_done  = est_wait + avg_svc
+            row_data["pos"].config(text=f" {i+1:02d} ")
+            row_data["cust"].config(text=f"Customer #{c.id}")
+            row_data["wait"].config(text=f" waited {waited:.1f}s")
+            row_data["est"].config(text=f" chờ thêm ≈ {est_wait:.1f}s")
+            row_data["done"].config(text=f" xong lúc ≈ +{est_done:.1f}s")
 
-            row_data["pos"].config(
-                text=f" {i+1:02d} "
-            )
-
-            row_data["cust"].config(
-                text=f"Customer #{c.id}"
-            )
-
-            row_data["wait"].config(
-                text=f" waited {waited:.1f}s"
-            )
-
-            row_data["est"].config(
-                text=f" chờ thêm ≈ {est_wait:.1f}s"
-            )
-
-            row_data["done"].config(
-                text=f" xong lúc ≈ +{est_done:.1f}s"
-            )
-
-        # queue empty
         if not queue_data:
-
             if not hasattr(self, "_empty_lbl"):
-
-                self._empty_lbl = tk.Label(
-                    self._q_inner,
-                    text="  — queue empty —",
-                    bg="#0d0d1a",
-                    fg=MUTED,
-                    font=F_BODY
-                )
-
+                self._empty_lbl = tk.Label(self._q_inner, text="  — queue empty —",
+                                           bg="#0d0d1a", fg=MUTED, font=F_BODY)
             self._empty_lbl.pack(anchor="w", pady=6)
-
         else:
-
             if hasattr(self, "_empty_lbl"):
                 self._empty_lbl.pack_forget()
 
-        self._qcanvas.configure(
-            scrollregion=self._qcanvas.bbox("all")
-        )
+        self._qcanvas.configure(scrollregion=self._qcanvas.bbox("all"))
 
 
 # ══════════════════════════════════════════════════════════════════════

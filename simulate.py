@@ -26,30 +26,12 @@ LBL_FONT   = ("Segoe UI", 10)
 ENTRY_FONT = ("Consolas", 10)
 
 
-def metrics_dd1k(lam, mu, K):
-    """D/D/1/K – deterministic closed-form."""
-    rho = lam / mu
-    if rho < 1:
-        L  = rho
-        Lq = 0.0
-        W  = 1 / mu
-        Wq = 0.0
-    elif rho == 1:
-        L  = K / 2
-        Lq = max(0, K / 2 - 1)
-        W  = L / lam
-        Wq = Lq / lam
-    else:
-        L  = K
-        Lq = K - 1
-        lam_eff = mu
-        W  = L / lam_eff
-        Wq = Lq / lam_eff
-    return dict(rho=rho, L=L, Lq=Lq, W=W, Wq=Wq)
-
+# ══════════════════════════════════════════════════════════════════════
+#  ANALYTIC METRICS
+# ══════════════════════════════════════════════════════════════════════
 
 def metrics_mm1(lam, mu):
-    """M/M/1 – classical formulas (requires ρ < 1)."""
+    """M/M/1 – classical formulas."""
     rho = lam / mu
     if rho >= 1:
         return dict(rho=rho, L=float('inf'), Lq=float('inf'),
@@ -58,6 +40,24 @@ def metrics_mm1(lam, mu):
     Lq = rho**2 / (1 - rho)
     W  = 1 / (mu - lam)
     Wq = lam / (mu * (mu - lam))
+    return dict(rho=rho, L=L, Lq=Lq, W=W, Wq=Wq)
+
+
+def metrics_mmc(lam, mu, C):
+    """M/M/C – Erlang-C formulas."""
+    rho = lam / (C * mu)
+    a   = lam / mu
+    if rho >= 1:
+        return dict(rho=rho, L=float('inf'), Lq=float('inf'),
+                    W=float('inf'), Wq=float('inf'))
+    sum_term = sum(a**n / math.factorial(n) for n in range(C))
+    sum_term += a**C / (math.factorial(C) * (1 - rho))
+    P0 = 1 / sum_term
+    Cw = (a**C / (math.factorial(C) * (1 - rho))) * P0
+    Lq = Cw * rho / (1 - rho)
+    Wq = Lq / lam
+    W  = Wq + 1 / mu
+    L  = lam * W
     return dict(rho=rho, L=L, Lq=Lq, W=W, Wq=Wq)
 
 
@@ -79,86 +79,71 @@ def metrics_mm1k(lam, mu, K):
     return dict(rho=rho, L=L, Lq=max(0, Lq), W=W, Wq=max(0, Wq))
 
 
-def metrics_mmC(lam, mu, C):
-    """M/M/C – Erlang-C formulas."""
-    rho = lam / (C * mu)
-    a   = lam / mu
-
+def metrics_mg1(lam, mu, sigma):
+    """M/G/1 – Pollaczek–Khinchine formula.
+    sigma = std dev của service time (người dùng nhập).
+    """
+    rho = lam / mu
     if rho >= 1:
         return dict(rho=rho, L=float('inf'), Lq=float('inf'),
                     W=float('inf'), Wq=float('inf'))
-
-    sum_term = sum(a**n / math.factorial(n) for n in range(C))
-    sum_term += a**C / (math.factorial(C) * (1 - rho))
-    P0 = 1 / sum_term
-
-    Cw = (a**C / (math.factorial(C) * (1 - rho))) * P0
-    Lq = Cw * rho / (1 - rho)
-    Wq = Lq / lam
-    W  = Wq + 1 / mu
-    L  = lam * W
+    ES  = 1.0 / mu
+    ES2 = sigma**2 + ES**2          # E[S²] = Var[S] + (E[S])²
+    Lq  = lam**2 * ES2 / (2 * (1 - rho))
+    Wq  = Lq / lam
+    W   = Wq + ES
+    L   = lam * W
     return dict(rho=rho, L=L, Lq=Lq, W=W, Wq=Wq)
 
 
-def metrics_mmCk(lam, mu, C, K):
-    """M/M/C/K – finite capacity multi-server."""
+def metrics_md1(lam, mu):
+    """M/D/1 – Deterministic service time (special case of M/G/1, σ=0)."""
     rho = lam / mu
-    r   = lam / (C * mu)
-
-    P = [0.0] * (K + 1)
-    sum_val = sum(rho**n / math.factorial(n) for n in range(C))
-    if abs(r - 1.0) < 1e-9:
-        sum_val += rho**C / math.factorial(C) * (K - C + 1)
-    else:
-        sum_val += rho**C / math.factorial(C) * \
-                   (1 - r**(K - C + 1)) / (1 - r)
-    P0 = 1 / sum_val if sum_val > 0 else 0
-
-    for n in range(K + 1):
-        if n < C:
-            P[n] = rho**n / math.factorial(n) * P0
-        else:
-            P[n] = rho**n / (math.factorial(C) * C**(n - C)) * P0
-
-    PK      = P[K]
-    lam_eff = lam * (1 - PK)
-    L       = sum(n * P[n] for n in range(K + 1))
-    Lq      = sum((n - C) * P[n] for n in range(C, K + 1))
-    W       = L / lam_eff if lam_eff > 0 else float('inf')
-    Wq      = Lq / lam_eff if lam_eff > 0 else float('inf')
-    util    = lam_eff / (C * mu)
-    return dict(rho=util, L=L, Lq=max(0, Lq), W=W, Wq=max(0, Wq))
+    if rho >= 1:
+        return dict(rho=rho, L=float('inf'), Lq=float('inf'),
+                    W=float('inf'), Wq=float('inf'))
+    # P-K formula with σ=0  →  E[S²] = (1/μ)²
+    ES  = 1.0 / mu
+    ES2 = ES**2                     # σ=0, so E[S²] = E[S]²
+    Lq  = lam**2 * ES2 / (2 * (1 - rho))
+    Wq  = Lq / lam
+    W   = Wq + ES
+    L   = lam * W
+    return dict(rho=rho, L=L, Lq=Lq, W=W, Wq=Wq)
 
 
-def compute_metrics(model, lam, mu, K=None, C=None):
-    """Dispatch to the right analytic formula."""
+def compute_metrics(model, lam, mu, K=None, C=None, sigma=None):
     try:
-        if model == "D/D/1/K":
-            return metrics_dd1k(lam, mu, K)
-        elif model == "M/M/1":
+        if model == "M/M/1":
             return metrics_mm1(lam, mu)
+        elif model == "M/M/C":
+            return metrics_mmc(lam, mu, C)
         elif model == "M/M/1/K":
             return metrics_mm1k(lam, mu, K)
-        elif model == "M/M/C":
-            return metrics_mmC(lam, mu, C)
-        elif model == "M/M/C/K":
-            return metrics_mmCk(lam, mu, C, K)
+        elif model == "M/G/1":
+            s = sigma if sigma is not None else 1.0 / mu
+            return metrics_mg1(lam, mu, s)
+        elif model == "M/D/1":
+            return metrics_md1(lam, mu)
     except Exception:
         pass
     return None
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  SIMULATION HELPERS
+# ══════════════════════════════════════════════════════════════════════
 
 ARRIVAL   = 0
 DEPARTURE = 1
 
 
 def _init_results():
-    """Khởi tạo dict kết quả rỗng."""
     return {
         "times":           [0.0],
         "entities_sys":    [0],
         "waiting_q":       [0],
-        "waiting_sys":     [],       
+        "waiting_sys":     [],
         "departure_times": [],
         "arrival_times":   [],
         "balking":         [0],
@@ -166,120 +151,25 @@ def _init_results():
 
 
 def _snapshot(res, t, in_system, n_in_queue, total_balk):
-    """Ghi snapshot tại thời điểm t."""
     res["times"].append(t)
     res["entities_sys"].append(in_system)
     res["waiting_q"].append(n_in_queue)
     res["balking"].append(total_balk)
 
 
-def _pad_results(res):
-    return res
-
-
 # ══════════════════════════════════════════════════════════════════════
-#  MODEL 1: D/D/1/K  (Deterministic)
-# ══════════════════════════════════════════════════════════════════════
-
-def dd1k_simulate(lam, mu, K, M, n_events=100):
-    """
-    D/D/1/K event-based simulation.
-    Arrivals và departures đều được schedule chính xác.
-    M = số customer ban đầu trong hệ thống.
-    """
-    inter_arr = 1.0 / lam
-    svc_time  = 1.0 / mu
-
-    res         = _init_results()
-    total_balk  = 0
-    event_ctr   = [0]       
-    eid         = [0]
-
-    # State
-    in_system      = min(M, K)
-    server_busy    = False
-    server_free_at = 0.0
-    queue          = []          
-    heap           = []
-
-    def schedule(t, etype):
-        heapq.heappush(heap, (t, etype, eid[0]))
-        eid[0] += 1
-
-    if in_system > 0:
-        server_busy    = True
-        server_free_at = svc_time
-        for i in range(in_system - 1):
-            queue.append(0.0)     
-        schedule(svc_time, DEPARTURE)
-
-    # Schedule arrival đầu tiên
-    schedule(inter_arr, ARRIVAL)
-    next_arr_time = inter_arr
-
-    res["entities_sys"][0] = in_system
-    res["waiting_q"][0]    = max(0, in_system - (1 if server_busy else 0))
-
-    while heap and event_ctr[0] < n_events:
-        t, etype, _ = heapq.heappop(heap)
-
-        _snapshot(res, t, in_system,
-                  max(0, in_system - (1 if server_busy else 0)),
-                  total_balk)
-
-        if etype == ARRIVAL:
-            res["arrival_times"].append(t)
-            event_ctr[0] += 1
-
-            if in_system < K:
-                in_system += 1
-                if not server_busy:
-                    # Server rảnh → phục vụ ngay (D/D/1: không chờ)
-                    server_busy    = True
-                    server_free_at = t + svc_time
-                    res["waiting_sys"].append(0.0)
-                    schedule(server_free_at, DEPARTURE)
-                else:
-                    queue.append(t)
-            else:
-                total_balk += 1
-
-            # Schedule arrival kế tiếp
-            next_arr_time += inter_arr
-            schedule(next_arr_time, ARRIVAL)
-
-        elif etype == DEPARTURE:
-            res["departure_times"].append(t)
-            in_system -= 1         
-
-            if queue:
-                arrive_t  = queue.pop(0)
-                wait_time = t - arrive_t   
-                res["waiting_sys"].append(wait_time)
-                server_free_at = t + svc_time
-                schedule(server_free_at, DEPARTURE)
-            else:
-                server_busy = False
-
-    return _pad_results(res)
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  MODEL 2: M/M/1  (Vô hạn capacity, 1 server)
+#  MODEL 1: M/M/1
 # ══════════════════════════════════════════════════════════════════════
 
 def mm1_simulate(lam, mu, n_events=100):
-    """
-    M/M/1 event-based simulation.
-    Không giới hạn capacity → không có balking.
-    """
-    res        = _init_results()
-    in_system  = 0
+    """M/M/1: Poisson arrivals, Exponential service, 1 server, ∞ capacity."""
+    res         = _init_results()
+    in_system   = 0
     server_busy = False
-    queue      = []          
-    heap       = []
-    eid        = [0]
-    dep_count  = [0]
+    queue       = []
+    heap        = []
+    eid         = [0]
+    dep_count   = [0]
 
     def schedule(t, etype):
         heapq.heappush(heap, (t, etype, eid[0]))
@@ -289,55 +179,103 @@ def mm1_simulate(lam, mu, n_events=100):
 
     while heap and dep_count[0] < n_events:
         t, etype, _ = heapq.heappop(heap)
-
         _snapshot(res, t, in_system,
-                  max(0, in_system - (1 if server_busy else 0)),
-                  0)
+                  max(0, in_system - (1 if server_busy else 0)), 0)
 
         if etype == ARRIVAL:
             res["arrival_times"].append(t)
             in_system += 1
-
             if not server_busy:
                 server_busy = True
                 res["waiting_sys"].append(0.0)
                 schedule(t + random.expovariate(mu), DEPARTURE)
             else:
                 queue.append(t)
-
             schedule(t + random.expovariate(lam), ARRIVAL)
 
         elif etype == DEPARTURE:
             res["departure_times"].append(t)
             dep_count[0] += 1
-            in_system -= 1         
-
+            in_system -= 1
             if queue:
-                arrive_t  = queue.pop(0)
-                wait_time = t - arrive_t
-                res["waiting_sys"].append(wait_time)
+                arrive_t = queue.pop(0)
+                res["waiting_sys"].append(t - arrive_t)
                 schedule(t + random.expovariate(mu), DEPARTURE)
             else:
                 server_busy = False
 
-    return _pad_results(res)
+    return res
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  MODEL 3: M/M/1/K  (Finite capacity, 1 server)
+#  MODEL 2: M/M/C
+# ══════════════════════════════════════════════════════════════════════
+
+def mmc_simulate(lam, mu, C, n_events=100):
+    """M/M/C: Poisson arrivals, Exponential service, C servers, ∞ capacity."""
+    res       = _init_results()
+    in_system = 0
+    servers   = [0.0] * C   # each entry = time server becomes free
+    queue     = []
+    heap      = []
+    eid       = [0]
+    dep_count = [0]
+
+    def schedule(t, etype):
+        heapq.heappush(heap, (t, etype, eid[0]))
+        eid[0] += 1
+
+    def n_busy(t):
+        return sum(1 for s in servers if s > t)
+
+    schedule(random.expovariate(lam), ARRIVAL)
+
+    while heap and dep_count[0] < n_events:
+        t, etype, _ = heapq.heappop(heap)
+        busy_now = n_busy(t)
+        _snapshot(res, t, in_system, max(0, in_system - busy_now), 0)
+
+        if etype == ARRIVAL:
+            res["arrival_times"].append(t)
+            in_system += 1
+            earliest_free = min(servers)
+            if earliest_free <= t:
+                idx = servers.index(earliest_free)
+                res["waiting_sys"].append(0.0)
+                svc_end = t + random.expovariate(mu)
+                servers[idx] = svc_end
+                schedule(svc_end, DEPARTURE)
+            else:
+                queue.append(t)
+            schedule(t + random.expovariate(lam), ARRIVAL)
+
+        elif etype == DEPARTURE:
+            res["departure_times"].append(t)
+            dep_count[0] += 1
+            in_system -= 1
+            # free the server whose finish time is closest to t
+            idx = min(range(C), key=lambda i: abs(servers[i] - t))
+            servers[idx] = t
+            if queue:
+                arrive_t = queue.pop(0)
+                res["waiting_sys"].append(t - arrive_t)
+                svc_end = t + random.expovariate(mu)
+                servers[idx] = svc_end
+                schedule(svc_end, DEPARTURE)
+
+    return res
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  MODEL 3: M/M/1/K
 # ══════════════════════════════════════════════════════════════════════
 
 def mm1k_simulate(lam, mu, K, n_events=100):
-    """
-    M/M/1/K event-based simulation đúng chuẩn.
-
-    LỖI GỐC đã sửa: in_system -= 1 chỉ xảy ra trong event DEPARTURE,
-    KHÔNG phải ngay sau khi schedule service.
-    """
+    """M/M/1/K: Poisson arrivals, Exponential service, 1 server, capacity K."""
     res         = _init_results()
     in_system   = 0
     server_busy = False
-    queue       = []         
+    queue       = []
     total_balk  = 0
     heap        = []
     eid         = [0]
@@ -351,198 +289,147 @@ def mm1k_simulate(lam, mu, K, n_events=100):
 
     while heap and dep_count[0] < n_events:
         t, etype, _ = heapq.heappop(heap)
-
         _snapshot(res, t, in_system,
-                  max(0, in_system - (1 if server_busy else 0)),
-                  total_balk)
+                  max(0, in_system - (1 if server_busy else 0)), total_balk)
 
         if etype == ARRIVAL:
             res["arrival_times"].append(t)
-
             if in_system < K:
                 in_system += 1
-
                 if not server_busy:
-                    # Server rảnh → phục vụ ngay, không chờ
                     server_busy = True
                     res["waiting_sys"].append(0.0)
                     schedule(t + random.expovariate(mu), DEPARTURE)
                 else:
-                    # Server bận → vào queue chờ
                     queue.append(t)
             else:
-                # Hệ thống đầy (in_system == K) → balking
                 total_balk += 1
-
             schedule(t + random.expovariate(lam), ARRIVAL)
 
         elif etype == DEPARTURE:
             res["departure_times"].append(t)
             dep_count[0] += 1
-            in_system -= 1     
-
+            in_system -= 1
             if queue:
-                arrive_t  = queue.pop(0)
-                wait_time = t - arrive_t
-                res["waiting_sys"].append(wait_time)
+                arrive_t = queue.pop(0)
+                res["waiting_sys"].append(t - arrive_t)
                 schedule(t + random.expovariate(mu), DEPARTURE)
             else:
                 server_busy = False
 
-    return _pad_results(res)
+    return res
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  MODEL 4: M/M/C  (Vô hạn capacity, C servers)
+#  MODEL 4: M/G/1
 # ══════════════════════════════════════════════════════════════════════
 
-def mmC_simulate(lam, mu, C, n_events=100):
+def mg1_simulate(lam, mu, sigma, n_events=100):
+    """M/G/1: Poisson arrivals, General (Normal truncated) service, 1 server.
+    mu    = mean service rate  → mean service time = 1/mu
+    sigma = std dev of service time
     """
-    M/M/C event-based simulation.
-    servers[] là list thời điểm mỗi server rảnh.
-    Customer được assign cho server rảnh sớm nhất (min(servers)).
-    """
-    res        = _init_results()
-    in_system  = 0
-    servers    = [0.0] * C     
-    queue      = []            
-    heap       = []
-    eid        = [0]
-    dep_count  = [0]
+    res         = _init_results()
+    in_system   = 0
+    server_busy = False
+    queue       = []
+    heap        = []
+    eid         = [0]
+    dep_count   = [0]
+
+    def svc_time():
+        """Sample service time ~ Normal(1/μ, σ), truncated at 0."""
+        return max(1e-9, random.gauss(1.0 / mu, sigma))
 
     def schedule(t, etype):
         heapq.heappush(heap, (t, etype, eid[0]))
         eid[0] += 1
 
-    def n_busy(t):
-        """Số server đang bận tại thời điểm t."""
-        return sum(1 for s in servers if s > t)
-
     schedule(random.expovariate(lam), ARRIVAL)
 
     while heap and dep_count[0] < n_events:
         t, etype, _ = heapq.heappop(heap)
-
-        busy_now = n_busy(t)
         _snapshot(res, t, in_system,
-                  max(0, in_system - busy_now),
-                  0)
+                  max(0, in_system - (1 if server_busy else 0)), 0)
 
         if etype == ARRIVAL:
             res["arrival_times"].append(t)
             in_system += 1
-
-            # Tìm server rảnh sớm nhất
-            earliest_free = min(servers)
-            if earliest_free <= t:
-                # Có server rảnh → phục vụ ngay
-                idx = servers.index(earliest_free)
+            if not server_busy:
+                server_busy = True
                 res["waiting_sys"].append(0.0)
-                svc_end    = t + random.expovariate(mu)
-                servers[idx] = svc_end
-                schedule(svc_end, DEPARTURE)
+                schedule(t + svc_time(), DEPARTURE)
             else:
-                # Tất cả C servers đều bận → vào queue
                 queue.append(t)
-
             schedule(t + random.expovariate(lam), ARRIVAL)
 
         elif etype == DEPARTURE:
             res["departure_times"].append(t)
             dep_count[0] += 1
-            in_system -= 1         
-            closest_idx = min(range(C), key=lambda i: abs(servers[i] - t))
-            servers[closest_idx] = t   
-
+            in_system -= 1
             if queue:
-                arrive_t  = queue.pop(0)
-                wait_time = t - arrive_t
-                res["waiting_sys"].append(wait_time)
-                svc_end = t + random.expovariate(mu)
-                servers[closest_idx] = svc_end
-                schedule(svc_end, DEPARTURE)
+                arrive_t = queue.pop(0)
+                res["waiting_sys"].append(t - arrive_t)
+                schedule(t + svc_time(), DEPARTURE)
+            else:
+                server_busy = False
 
-    return _pad_results(res)
+    return res
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  MODEL 5: M/M/C/K  (Finite capacity, C servers)
+#  MODEL 5: M/D/1
 # ══════════════════════════════════════════════════════════════════════
 
-def mmCk_simulate(lam, mu, C, K, n_events=100):
-    """
-    M/M/C/K event-based simulation.
-    Kết hợp finite capacity (balking khi in_system == K)
-    và multi-server (assign server rảnh sớm nhất).
-    """
-    res        = _init_results()
-    in_system  = 0
-    servers    = [0.0] * C
-    queue      = []
-    total_balk = 0
-    heap       = []
-    eid        = [0]
-    dep_count  = [0]
+def md1_simulate(lam, mu, n_events=100):
+    """M/D/1: Poisson arrivals, Deterministic service time = 1/μ, 1 server."""
+    res         = _init_results()
+    in_system   = 0
+    server_busy = False
+    queue       = []
+    heap        = []
+    eid         = [0]
+    dep_count   = [0]
+    svc_time    = 1.0 / mu          # constant
 
     def schedule(t, etype):
         heapq.heappush(heap, (t, etype, eid[0]))
         eid[0] += 1
 
-    def n_busy(t):
-        return sum(1 for s in servers if s > t)
-
     schedule(random.expovariate(lam), ARRIVAL)
 
     while heap and dep_count[0] < n_events:
         t, etype, _ = heapq.heappop(heap)
-
-        busy_now = n_busy(t)
         _snapshot(res, t, in_system,
-                  max(0, in_system - busy_now),
-                  total_balk)
+                  max(0, in_system - (1 if server_busy else 0)), 0)
 
         if etype == ARRIVAL:
             res["arrival_times"].append(t)
-
-            if in_system < K:
-                in_system += 1
-
-                earliest_free = min(servers)
-                if earliest_free <= t:
-                    # Server rảnh → phục vụ ngay
-                    idx = servers.index(earliest_free)
-                    res["waiting_sys"].append(0.0)
-                    svc_end      = t + random.expovariate(mu)
-                    servers[idx] = svc_end
-                    schedule(svc_end, DEPARTURE)
-                else:
-                    queue.append(t)
+            in_system += 1
+            if not server_busy:
+                server_busy = True
+                res["waiting_sys"].append(0.0)
+                schedule(t + svc_time, DEPARTURE)
             else:
-                total_balk += 1
-
+                queue.append(t)
             schedule(t + random.expovariate(lam), ARRIVAL)
 
         elif etype == DEPARTURE:
             res["departure_times"].append(t)
             dep_count[0] += 1
-            in_system -= 1        
-
-            closest_idx = min(range(C), key=lambda i: abs(servers[i] - t))
-            servers[closest_idx] = t
-
+            in_system -= 1
             if queue:
-                arrive_t  = queue.pop(0)
-                wait_time = t - arrive_t
-                res["waiting_sys"].append(wait_time)
-                svc_end = t + random.expovariate(mu)
-                servers[closest_idx] = svc_end
-                schedule(svc_end, DEPARTURE)
+                arrive_t = queue.pop(0)
+                res["waiting_sys"].append(t - arrive_t)
+                schedule(t + svc_time, DEPARTURE)
+            else:
+                server_busy = False
 
-    return _pad_results(res)
+    return res
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  PLOT WINDOW
+#  PLOT WINDOW  (6 subplots, same layout as original)
 # ══════════════════════════════════════════════════════════════════════
 
 class PlotWindow(tk.Toplevel):
@@ -555,47 +442,45 @@ class PlotWindow(tk.Toplevel):
         self._build(model_name)
 
     def _build(self, model_name):
-        hdr = tk.Label(self, text=f"  {model_name}  –  Simulation Results  ",
+        hdr = tk.Label(self,
+                       text=f"  {model_name}  –  Simulation Results  ",
                        bg=PURPLE, fg=TEXT, font=TITLE_FONT, pady=6)
         hdr.pack(fill="x")
 
-        r = self.results
-
-        n_sys = min(len(r["times"]), len(r["entities_sys"]))
-        n_q   = min(len(r["times"]), len(r["waiting_q"]))
+        r     = self.results
         waits = [w for w in r["waiting_sys"] if w is not None]
 
         plots = [
-            ("Entities in System", "Time", "# Entities",
-            r["times"][:len(r["entities_sys"])],
-            r["entities_sys"][:len(r["entities_sys"])],
-            PURPLE, True),
+            ("Entities in System",      "Time",       "# Entities",
+             r["times"][:len(r["entities_sys"])],
+             r["entities_sys"],
+             PURPLE, True),
 
-            ("Waiting in Queue", "Time", "# Waiting",
-            r["times"][:len(r["waiting_q"])],
-            r["waiting_q"][:len(r["waiting_q"])],
-            "#3498db", True),
+            ("Waiting in Queue",        "Time",       "# Waiting",
+             r["times"][:len(r["waiting_q"])],
+             r["waiting_q"],
+             "#3498db", True),
 
             ("Waiting Time per Customer", "Customer #", "Wait (time units)",
-            list(range(len(waits))),
-            waits,
-            "#e67e22", False),
+             list(range(len(waits))),
+             waits,
+             "#e67e22", False),
 
-            ("Departure Times", "Customer #", "Departure Time",
-            list(range(len(r["departure_times"]))),
-            r["departure_times"],
-            GREEN, False),
+            ("Departure Times",         "Customer #", "Departure Time",
+             list(range(len(r["departure_times"]))),
+             r["departure_times"],
+             GREEN, False),
 
-            ("Balking (Cumulative)", "Time", "Customers Balked",
-            r["times"][:len(r["balking"])],
-            r["balking"][:len(r["balking"])],
-            RED_BTN, True),
+            ("Balking (Cumulative)",    "Time",       "Customers Balked",
+             r["times"][:len(r["balking"])],
+             r["balking"],
+             RED_BTN, True),
 
-            ("Arrival Times", "Customer #", "Arrival Time",
-            list(range(len(r["arrival_times"]))),
-            r["arrival_times"],
-            "#1abc9c", False),
-]
+            ("Arrival Times",           "Customer #", "Arrival Time",
+             list(range(len(r["arrival_times"]))),
+             r["arrival_times"],
+             "#1abc9c", False),
+        ]
 
         fig, axes = plt.subplots(3, 2, figsize=(12, 9))
         fig.patch.set_facecolor("#1e1e1e")
@@ -634,21 +519,32 @@ class PlotWindow(tk.Toplevel):
 # ══════════════════════════════════════════════════════════════════════
 
 class QueueApp(tk.Tk):
-    MODELS = ["D/D/1/K", "M/M/1", "M/M/1/K", "M/M/C", "M/M/C/K"]
+    MODELS = ["M/M/1", "M/M/C", "M/M/1/K", "M/G/1", "M/D/1"]
+
+    # Fields active for each model
+    _ACTIVE = {
+        "M/M/1":   {"lam", "mu"},
+        "M/M/C":   {"lam", "mu", "C"},
+        "M/M/1/K": {"lam", "mu", "K"},
+        "M/G/1":   {"lam", "mu", "sigma"},
+        "M/D/1":   {"lam", "mu"},
+    }
 
     def __init__(self):
         super().__init__()
         self.title("Queueing ModelSim")
         self.configure(bg=BG_DARK)
         self.resizable(False, False)
-        self._selected_model = tk.StringVar(value="D/D/1/K")
+        self._selected_model = tk.StringVar(value="M/M/1")
         self._build_ui()
 
+    # ── UI construction ───────────────────────────────────────────────
     def _build_ui(self):
         title_bar = tk.Frame(self, bg="#1a1a2e", height=32)
         title_bar.pack(fill="x")
         tk.Label(title_bar, text="  ⬡  Queueing ModelSim",
-                 bg="#1a1a2e", fg=PURPLE, font=TITLE_FONT).pack(side="left", pady=4)
+                 bg="#1a1a2e", fg=PURPLE, font=TITLE_FONT
+                 ).pack(side="left", pady=4)
 
         outer = tk.Frame(self, bg=BG_DARK, padx=10, pady=10)
         outer.pack(fill="both", expand=True)
@@ -660,17 +556,17 @@ class QueueApp(tk.Tk):
         mdl_frame.grid(row=0, column=0, padx=(0, 10), pady=0, sticky="ns")
 
         for m in self.MODELS:
-            rb = tk.Radiobutton(mdl_frame, text=m,
-                                variable=self._selected_model, value=m,
-                                indicatoron=False,
-                                bg=PURPLE, fg=TEXT,
-                                selectcolor=PURPLE_HV,
-                                activebackground=PURPLE_HV,
-                                font=BTN_FONT, width=10,
-                                relief="flat", bd=0, pady=8,
-                                cursor="hand2",
-                                command=self._on_model_change)
-            rb.pack(fill="x", pady=4)
+            tk.Radiobutton(mdl_frame, text=m,
+                           variable=self._selected_model, value=m,
+                           indicatoron=False,
+                           bg=PURPLE, fg=TEXT,
+                           selectcolor=PURPLE_HV,
+                           activebackground=PURPLE_HV,
+                           font=BTN_FONT, width=10,
+                           relief="flat", bd=0, pady=8,
+                           cursor="hand2",
+                           command=self._on_model_change
+                           ).pack(fill="x", pady=4)
 
         # ── Inputs panel ──────────────────────────────────────────────
         inp_frame = tk.LabelFrame(outer, text=" Inputs ",
@@ -678,12 +574,13 @@ class QueueApp(tk.Tk):
                                   bd=2, relief="groove", padx=16, pady=12)
         inp_frame.grid(row=0, column=1, sticky="nsew")
 
+        # lam, mu, K, C, sigma
         fields = [
-            ("Arrival rate (λ):",      "lam",  "1/4"),
-            ("Service rate (μ):",      "mu",   "1/6"),
-            ("Queue Capacity (K):",    "K",    "5"),
-            ("Servers (C):",           "C",    ""),
-            ("Initial Customers (M):", "M",    "0"),
+            ("Arrival rate (λ):",        "lam",   "2"),
+            ("Service rate (μ):",        "mu",    "3"),
+            ("Queue Capacity (K):",      "K",     "10"),
+            ("Servers (C):",             "C",     "2"),
+            ("Std-dev of svc time (σ):", "sigma", ""),
         ]
 
         self._entries = {}
@@ -715,20 +612,23 @@ class QueueApp(tk.Tk):
                   bg=RED_BTN, fg=TEXT, font=BTN_FONT,
                   activebackground=RED_HV, activeforeground=TEXT,
                   relief="flat", bd=0, padx=20, pady=10,
-                  cursor="hand2").pack(side="left", expand=True, fill="x", padx=(0, 8))
+                  cursor="hand2"
+                  ).pack(side="left", expand=True, fill="x", padx=(0, 8))
 
         tk.Button(btn_row, text="▶  Calculate",
                   command=self._calculate,
                   bg=GREEN, fg=TEXT, font=BTN_FONT,
                   activebackground=GREEN_HV, activeforeground=TEXT,
                   relief="flat", bd=0, padx=20, pady=10,
-                  cursor="hand2").pack(side="left", expand=True, fill="x")
+                  cursor="hand2"
+                  ).pack(side="left", expand=True, fill="x")
 
         # ── Performance Metrics panel ─────────────────────────────────
         res_frame = tk.LabelFrame(outer, text=" Performance Metrics ",
                                   bg=BG_PANEL, fg=PURPLE, font=BTN_FONT,
                                   bd=2, relief="groove", padx=16, pady=10)
-        res_frame.grid(row=1, column=0, columnspan=2, pady=(10, 0), sticky="ew")
+        res_frame.grid(row=1, column=0, columnspan=2,
+                       pady=(10, 0), sticky="ew")
         outer.grid_columnconfigure(1, weight=1)
 
         metric_defs = [
@@ -753,21 +653,16 @@ class QueueApp(tk.Tk):
             var = tk.StringVar(value="—")
             tk.Label(cell, textvariable=var, bg="#1e1e1e", fg=GREEN,
                      font=("Consolas", 11, "bold"),
-                     width=10, relief="flat", pady=4).pack(fill="x", pady=(4, 0))
+                     width=10, relief="flat", pady=4
+                     ).pack(fill="x", pady=(4, 0))
             self._metric_vars[key] = var
 
         self._on_model_change()
 
+    # ── model change → hide/show fields ──────────────────────────────
     def _on_model_change(self):
-        model = self._selected_model.get()
-
-        active = {
-            "D/D/1/K":  {"lam", "mu", "K", "M"},
-            "M/M/1":    {"lam", "mu"},
-            "M/M/1/K":  {"lam", "mu", "K"},
-            "M/M/C":    {"lam", "mu", "C"},
-            "M/M/C/K":  {"lam", "mu", "C", "K"},
-        }.get(model, {"lam", "mu"})
+        model  = self._selected_model.get()
+        active = self._ACTIVE.get(model, {"lam", "mu"})
 
         for key, entry in self._entries.items():
             lbl = self._labels[key]
@@ -785,88 +680,75 @@ class QueueApp(tk.Tk):
             for var in self._metric_vars.values():
                 var.set("—")
 
-    def _parse_rate(self, s):
-        s = s.strip()
-        if "/" in s:
-            num, den = s.split("/")
-            return float(num) / float(den)
-        return float(s)
-
-    def _get_float(self, key, default=None):
+    # ── parse helpers ─────────────────────────────────────────────────
+    def _pf(self, key, default=None):
         try:
-            return self._parse_rate(self._entries[key].get())
+            s = self._entries[key].get().strip()
+            if "/" in s:
+                a, b = s.split("/")
+                return float(a) / float(b)
+            return float(s)
         except Exception:
             return default
 
-    def _get_int(self, key, default=None):
+    def _pi(self, key, default=None):
         try:
-            return int(self._entries[key].get())
+            return int(self._entries[key].get().strip())
         except Exception:
             return default
 
+    # ── calculate ────────────────────────────────────────────────────
     def _calculate(self):
         model = self._selected_model.get()
-        lam   = self._get_float("lam")
-        mu    = self._get_float("mu")
+        lam   = self._pf("lam")
+        mu    = self._pf("mu")
 
         if lam is None or lam <= 0:
-            messagebox.showerror("Input Error", "Invalid Arrival rate (λ)")
-            return
+            messagebox.showerror("Input Error", "Invalid Arrival rate (λ)"); return
         if mu is None or mu <= 0:
-            messagebox.showerror("Input Error", "Invalid Service rate (μ)")
-            return
+            messagebox.showerror("Input Error", "Invalid Service rate (μ)"); return
 
         try:
-            if model == "D/D/1/K":
-                K = self._get_int("K", 5)
-                M = self._get_int("M", 0)
-                if K < 1:
-                    messagebox.showerror("Input Error", "K phải ≥ 1")
-                    return
-                results = dd1k_simulate(lam, mu, K, M)
-
-            elif model == "M/M/1":
+            if model == "M/M/1":
                 results = mm1_simulate(lam, mu)
 
+            elif model == "M/M/C":
+                C = self._pi("C")
+                if C is None or C < 1:
+                    messagebox.showerror("Input Error", "Servers C phải ≥ 1"); return
+                results = mmc_simulate(lam, mu, C)
+
             elif model == "M/M/1/K":
-                K = self._get_int("K")
+                K = self._pi("K")
                 if K is None or K < 1:
-                    messagebox.showerror("Input Error", "Queue Capacity K phải ≥ 1")
-                    return
+                    messagebox.showerror("Input Error", "Capacity K phải ≥ 1"); return
                 results = mm1k_simulate(lam, mu, K)
 
-            elif model == "M/M/C":
-                C = self._get_int("C")
-                if C is None or C < 1:
-                    messagebox.showerror("Input Error", "Servers C phải ≥ 1")
-                    return
-                results = mmC_simulate(lam, mu, C)
+            elif model == "M/G/1":
+                sigma = self._pf("sigma")
+                if sigma is None or sigma < 0:
+                    messagebox.showerror("Input Error",
+                                         "Std-dev σ phải ≥ 0\n(σ=0 → M/D/1)"); return
+                results = mg1_simulate(lam, mu, sigma)
 
-            elif model == "M/M/C/K":
-                C = self._get_int("C")
-                K = self._get_int("K")
-                if C is None or C < 1:
-                    messagebox.showerror("Input Error", "Servers C phải ≥ 1")
-                    return
-                if K is None or K < C:
-                    messagebox.showerror("Input Error", f"K phải ≥ C (= {C})")
-                    return
-                results = mmCk_simulate(lam, mu, C, K)
+            elif model == "M/D/1":
+                results = md1_simulate(lam, mu)
 
             else:
-                messagebox.showerror("Error", "Unknown model")
-                return
+                messagebox.showerror("Error", "Unknown model"); return
 
         except Exception as ex:
-            messagebox.showerror("Simulation Error", str(ex))
-            return
+            messagebox.showerror("Simulation Error", str(ex)); return
 
+        # show plots
         PlotWindow(self, model, results)
 
-        # ── Analytic metrics ──────────────────────────────────────────
+        # analytic metrics
+        sigma_val = self._pf("sigma", None)
         m = compute_metrics(model, lam, mu,
-                            K=self._get_int("K"),
-                            C=self._get_int("C"))
+                            K=self._pi("K"),
+                            C=self._pi("C"),
+                            sigma=sigma_val)
         if m:
             for key, var in self._metric_vars.items():
                 val = m.get(key)
