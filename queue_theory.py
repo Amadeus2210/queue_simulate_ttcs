@@ -1,3 +1,4 @@
+from pyexpat import model
 import tkinter as tk
 from tkinter import ttk, messagebox
 import math
@@ -482,7 +483,7 @@ class PlotWindow(tk.Toplevel):
              "#1abc9c", False),
         ]
 
-        fig, axes = plt.subplots(3, 2, figsize=(12, 9))
+        fig, axes = plt.subplots(3, 2, figsize=(8, 6))
         fig.patch.set_facecolor("#1e1e1e")
 
         for ax, (title, xlabel, ylabel, x, y, color, step) in zip(axes.flat, plots):
@@ -555,18 +556,31 @@ class QueueApp(tk.Tk):
                                   bd=2, relief="groove", padx=10, pady=10)
         mdl_frame.grid(row=0, column=0, padx=(0, 10), pady=0, sticky="ns")
 
+        self._model_buttons = {}
+
         for m in self.MODELS:
-            tk.Radiobutton(mdl_frame, text=m,
-                           variable=self._selected_model, value=m,
-                           indicatoron=False,
-                           bg=PURPLE, fg=TEXT,
-                           selectcolor=PURPLE_HV,
-                           activebackground=PURPLE_HV,
-                           font=BTN_FONT, width=10,
-                           relief="flat", bd=0, pady=8,
-                           cursor="hand2",
-                           command=self._on_model_change
-                           ).pack(fill="x", pady=4)
+            rb = tk.Radiobutton(
+                mdl_frame,
+                text=m,
+                variable=self._selected_model,
+                value=m,
+                indicatoron=False,
+                bg=PURPLE,
+                fg=TEXT,
+                selectcolor=PURPLE_HV,
+                activebackground=PURPLE_HV,
+                activeforeground=TEXT,
+                font=("Consolas", 10, "normal"),
+                width=10,
+                relief="flat",
+                bd=0,
+                pady=8,
+                cursor="hand2",
+                command=self._on_model_change
+            )
+
+            rb.pack(fill="x", pady=4)
+            self._model_buttons[m] = rb
 
         # ── Inputs panel ──────────────────────────────────────────────
         inp_frame = tk.LabelFrame(outer, text=" Inputs ",
@@ -664,8 +678,30 @@ class QueueApp(tk.Tk):
         model  = self._selected_model.get()
         active = self._ACTIVE.get(model, {"lam", "mu"})
 
+        # highlight selected model
+        for m, rb in self._model_buttons.items():
+            if m == model:
+                rb.config(
+                    bg="#d16eff",
+                    fg="white",
+                    activebackground="#e08cff",
+                    activeforeground="white",
+                    relief="raised",
+                    bd=2
+                )
+            else:
+                rb.config(
+                    bg=PURPLE,
+                    fg=TEXT,
+                    activebackground=PURPLE_HV,
+                    activeforeground=TEXT,
+                    relief="flat",
+                    bd=0
+                )
+
         for key, entry in self._entries.items():
             lbl = self._labels[key]
+
             if key in active:
                 lbl.grid()
                 entry.grid()

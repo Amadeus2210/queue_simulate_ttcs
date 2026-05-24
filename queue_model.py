@@ -1,14 +1,16 @@
-"""
-Queueing ModelSim  –  Live Interactive Simulator
-Models: M/M/1  |  M/M/C  |  M/G/1  |  M/G/C  |  M/M/1/K
-"""
-
 import tkinter as tk
 from tkinter import messagebox
 import math
 import random
 import time
 import threading
+
+import matplotlib
+matplotlib.use("TkAgg")
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
 
 # ─────────────────────────── palette ──────────────────────────────────
 BG        = "#1a1a2e"
@@ -130,7 +132,7 @@ def compute_metrics(model, lam, mu, C=1, K=10, sigma=None):
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  LIVE QUEUE ENGINE
+#  LIVE QUEUE ENGINE  (with time-series recording)
 # ══════════════════════════════════════════════════════════════════════
 
 class Customer:
@@ -144,6 +146,9 @@ class Customer:
 
 
 class QueueEngine:
+    # How many seconds between each recorded data point
+    RECORD_INTERVAL = 0.5
+
     def __init__(self, model, mu, C=1, K=999, sigma=None):
         self.model  = model
         self.mu     = mu
@@ -158,7 +163,6 @@ class QueueEngine:
 
         self._running   = False
         self._thread    = None
-        self._next_auto = 0.0
 
         self.total_arrived = 0
         self.total_served  = 0
@@ -172,6 +176,16 @@ class QueueEngine:
 
         self.last_event_time = time.time()
         self.start_time      = self.last_event_time
+
+        # ── time-series storage ────────────────────────────────────────
+        # Each entry: (elapsed_seconds, rho, L, Lq, W, Wq)
+        self.ts_time = []
+        self.ts_rho  = []
+        self.ts_L    = []
+        self.ts_Lq   = []
+        self.ts_W    = []
+        self.ts_Wq   = []
+        self._next_record = self.start_time + self.RECORD_INTERVAL
 
     def _service_time(self):
         if self.model in ("M/M/1", "M/M/C", "M/M/1/K"):
@@ -199,6 +213,23 @@ class QueueEngine:
         self.area_queue  += n_q * dt
         self.busy_time   += n_s * dt
         self.last_event_time = now
+
+    def _record_snapshot(self, now):
+        """Append one data point to the time-series arrays (call while holding lock)."""
+        elapsed = max(0.001, now - self.start_time)
+        rho_emp = self.busy_time / (elapsed * self.C)
+        L_emp   = self.area_system / elapsed
+        Lq_emp  = self.area_queue  / elapsed
+        n       = self.total_served
+        W_emp   = self.sum_W  / n if n > 0 else 0.0
+        Wq_emp  = self.sum_Wq / n if n > 0 else 0.0
+
+        self.ts_time.append(elapsed)
+        self.ts_rho.append(min(rho_emp, 2.0))   # cap display at 2 for readability
+        self.ts_L.append(L_emp)
+        self.ts_Lq.append(Lq_emp)
+        self.ts_W.append(W_emp)
+        self.ts_Wq.append(Wq_emp)
 
     def add_customer(self):
         now = time.time()
@@ -233,6 +264,10 @@ class QueueEngine:
                             nxt.finish = now + svc
                             self.servers[i]     = nxt
                             self.server_free[i] = nxt.finish
+                # periodic recording
+                if now >= self._next_record:
+                    self._record_snapshot(now)
+                    self._next_record = now + self.RECORD_INTERVAL
             time.sleep(0.05)
 
     def start(self):
@@ -282,112 +317,198 @@ class QueueEngine:
                 "finish_times": finish_times,
                 "exp_wait":     exp_wait,
                 "rho_emp":      rho_emp,
+                # time-series (copies so they won't mutate)
+                "ts_time": list(self.ts_time),
+                "ts_rho":  list(self.ts_rho),
+                "ts_L":    list(self.ts_L),
+                "ts_Lq":   list(self.ts_Lq),
+                "ts_W":    list(self.ts_W),
+                "ts_Wq":   list(self.ts_Wq),
             }
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  RESULT WINDOW
+#  RESULT WINDOW  –  time-series charts
 # ══════════════════════════════════════════════════════════════════════
+
+# Dark theme colours for matplotlib
+_MPL_BG   = "#1a1a2e"
+_MPL_AXES = "#0f3460"
+_MPL_GRID = "#2c3e50"
+
+_SERIES = [
+    ("ρ  Utilisation",     "ts_rho",  "#00d4ff",  "Utilisation (ρ)"),
+    ("L  Avg in System",   "ts_L",    "#2ecc71",  "Customers in System (L)"),
+    ("Lq Avg in Queue",    "ts_Lq",   "#f1c40f",  "Customers in Queue (Lq)"),
+    ("W  Avg System Time", "ts_W",    "#e67e22",  "System Time per Customer (W) [s]"),
+    ("Wq Avg Wait Time",   "ts_Wq",   "#e74c3c",  "Queue Wait per Customer (Wq) [s]"),
+]
+
 
 def show_results_window(parent, snap, model):
     win = tk.Toplevel(parent)
-    win.title("Simulation Results")
+    win.title("Simulation Results  –  Time Series")
     win.configure(bg=BG)
-    win.resizable(False, False)
+    win.resizable(True, True)
     win.grab_set()
 
     # ── header ────────────────────────────────────────────────────────
-    hdr = tk.Frame(win, bg="#0d0d1a", pady=10)
+    hdr = tk.Frame(win, bg="#0d0d1a", pady=8)
     hdr.pack(fill="x")
-    tk.Label(hdr, text="■  SIMULATION STOPPED",
+    tk.Label(hdr, text="■  SIMULATION STOPPED  –  Performance Over Time",
              bg="#0d0d1a", fg=RED, font=("Consolas", 12, "bold")
              ).pack(side="left", padx=14)
     tk.Label(hdr, text=f"Model: {model}",
              bg="#0d0d1a", fg=MUTED, font=F_BODY
              ).pack(side="right", padx=14)
 
-    body = tk.Frame(win, bg=BG, padx=20, pady=16)
-    body.pack(fill="both", expand=True)
-
-    # ── metric cards ─────────────────────────────────────────────────
-    metrics_title = tk.Label(body,
-        text="AVERAGE PERFORMANCE METRICS",
-        bg=BG, fg=PURPLE, font=("Consolas", 9, "bold"))
-    metrics_title.pack(anchor="w", pady=(0, 8))
-
-    cards_frame = tk.Frame(body, bg=BG)
-    cards_frame.pack(fill="x", pady=(0, 14))
-
-    rho = snap["rho_emp"]
-    L   = snap["L_emp"]
-    Lq  = snap["Lq_emp"]
-    W   = snap["W_emp"]
-    Wq  = snap["Wq_emp"]
-
-    def fmt(v):
-        if math.isinf(v): return "∞"
-        if v >= 10000:    return f"{v:,.0f}"
-        if v >= 100:      return f"{v:.1f}"
-        return f"{v:.4f}"
-
-    metric_cards = [
-        ("ρ",  "Utilisation",        fmt(rho),       CYAN,   "Server busy fraction"),
-        ("L",  "Avg in System",      fmt(L),          GREEN,  "Customers in system"),
-        ("Lq", "Avg in Queue",       fmt(Lq),         YELLOW, "Customers waiting"),
-        ("W",  "Avg System Time",    f"{fmt(W)} s",   ORANGE, "Time per customer"),
-        ("Wq", "Avg Wait Time",      f"{fmt(Wq)} s",  RED,    "Queue wait per customer"),
-    ]
-
-    for i, (sym, label, val, color, desc) in enumerate(metric_cards):
-        card = tk.Frame(cards_frame, bg=CARD, padx=14, pady=12,
-                        highlightthickness=1, highlightbackground=color)
-        card.grid(row=0, column=i, padx=5, sticky="ew")
-        cards_frame.grid_columnconfigure(i, weight=1)
-
-        tk.Label(card, text=sym, bg=CARD, fg=color,
-                 font=("Consolas", 20, "bold")).pack()
-        tk.Label(card, text=label, bg=CARD, fg=MUTED,
-                 font=("Segoe UI", 8)).pack()
-        tk.Label(card, text=val, bg="#0a0a1a", fg=color,
-                 font=("Consolas", 14, "bold"),
-                 pady=6, padx=8, width=10).pack(fill="x", pady=(6, 2))
-        tk.Label(card, text=desc, bg=CARD, fg=MUTED,
-                 font=("Segoe UI", 7)).pack()
-
-    # ── traffic summary ───────────────────────────────────────────────
-    sep = tk.Frame(body, bg=BORDER, height=1)
-    sep.pack(fill="x", pady=(4, 12))
-
-    tk.Label(body, text="TRAFFIC SUMMARY",
-             bg=BG, fg=PURPLE, font=("Consolas", 9, "bold")
-             ).pack(anchor="w", pady=(0, 8))
-
-    stats_frame = tk.Frame(body, bg=PANEL, padx=16, pady=12)
-    stats_frame.pack(fill="x")
-
+    # ── traffic summary bar ───────────────────────────────────────────
+    sb = tk.Frame(win, bg=PANEL, padx=16, pady=8)
+    sb.pack(fill="x")
     stats = [
         ("Customers arrived",  str(snap["total_arr"]),  TEXT),
         ("Customers served",   str(snap["total_svc"]),  GREEN),
         ("Customers balked",   str(snap["total_balk"]), RED),
         ("In system at stop",  str(snap["n_system"]),   YELLOW),
+        ("Final  ρ (emp)",     f"{snap['rho_emp']:.3f}", CYAN),
     ]
-
     for col, (lbl, val, color) in enumerate(stats):
-        fr = tk.Frame(stats_frame, bg=PANEL)
-        fr.grid(row=0, column=col, padx=20, sticky="w")
-        stats_frame.grid_columnconfigure(col, weight=1)
-        tk.Label(fr, text=lbl, bg=PANEL, fg=MUTED,
-                 font=("Segoe UI", 8)).pack(anchor="w")
-        tk.Label(fr, text=val, bg=PANEL, fg=color,
-                 font=("Consolas", 18, "bold")).pack(anchor="w")
+        fr = tk.Frame(sb, bg=PANEL)
+        fr.grid(row=0, column=col, padx=24, sticky="w")
+        sb.grid_columnconfigure(col, weight=1)
+        tk.Label(fr, text=lbl, bg=PANEL, fg=MUTED,  font=("Segoe UI", 8)).pack(anchor="w")
+        tk.Label(fr, text=val, bg=PANEL, fg=color,   font=("Consolas", 15, "bold")).pack(anchor="w")
 
-    # ── close button ─────────────────────────────────────────────────
-    tk.Button(body, text="✕  Close",
+    # ── chart selector tabs ───────────────────────────────────────────
+    tab_bar = tk.Frame(win, bg="#0d0d1a", pady=4)
+    tab_bar.pack(fill="x")
+
+    chart_frame = tk.Frame(win, bg=BG)
+    chart_frame.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+
+    ts = snap["ts_time"]
+    has_data = len(ts) >= 2
+
+    # Build one figure per metric for tab switching
+    _figures = {}  # tab_label -> (fig, canvas_widget)
+
+    def _make_single_chart(tab_label, ts_key, color, ylabel):
+        """Build a single-metric chart and return (fig, tk_widget)."""
+        fig = Figure(figsize=(6.5, 3.2), dpi=96, facecolor=_MPL_BG)
+        ax  = fig.add_subplot(111, facecolor=_MPL_AXES)
+
+        if has_data:
+            ys = snap[ts_key]
+            ax.plot(ts, ys, color=color, linewidth=1.6, alpha=0.9, zorder=3)
+            ax.fill_between(ts, ys, alpha=0.18, color=color, zorder=2)
+            # rolling mean (window ≈ 10 points)
+            w = max(1, len(ys) // 10)
+            if len(ys) >= w * 2:
+                rm = [sum(ys[max(0,i-w):i+1]) / len(ys[max(0,i-w):i+1])
+                      for i in range(len(ys))]
+                ax.plot(ts, rm, color="white", linewidth=1.0,
+                        linestyle="--", alpha=0.55, label="rolling avg", zorder=4)
+                ax.legend(fontsize=8, facecolor=_MPL_AXES, edgecolor=_MPL_GRID,
+                          labelcolor="white", loc="upper left")
+        else:
+            ax.text(0.5, 0.5, "Not enough data\n(run longer or add customers)",
+                    transform=ax.transAxes, ha="center", va="center",
+                    color=MUTED, fontsize=11)
+
+        ax.set_xlabel("Elapsed time (s)", color=MUTED, fontsize=9)
+        ax.set_ylabel(ylabel,             color=color,  fontsize=9)
+        ax.set_title(tab_label,           color=color,  fontsize=11, fontweight="bold", pad=10)
+        ax.tick_params(colors=MUTED, labelsize=8)
+        ax.spines[:].set_color(_MPL_GRID)
+        ax.grid(True, color=_MPL_GRID, linewidth=0.5, linestyle="--", alpha=0.6)
+        fig.tight_layout(pad=1.4)
+
+        canvas = FigureCanvasTkAgg(fig, master=chart_frame)
+        w = canvas.get_tk_widget()
+        w.configure(bg=_MPL_BG)
+        return fig, w
+
+    # ── all-in-one overview chart ─────────────────────────────────────
+    def _make_overview():
+        fig = Figure(figsize=(9, 7.5), dpi=96, facecolor=_MPL_BG)
+        fig.subplots_adjust(hspace=0.55, left=0.09, right=0.97, top=0.94, bottom=0.07)
+        for idx, (tab_lbl, ts_key, color, ylabel) in enumerate(_SERIES):
+            ax = fig.add_subplot(3, 2, idx + 1, facecolor=_MPL_AXES)
+            if has_data:
+                ys = snap[ts_key]
+                ax.plot(ts, ys, color=color, linewidth=1.4, alpha=0.9, zorder=3)
+                ax.fill_between(ts, ys, alpha=0.15, color=color, zorder=2)
+            else:
+                ax.text(0.5, 0.5, "—", transform=ax.transAxes,
+                        ha="center", va="center", color=MUTED, fontsize=14)
+            sym = tab_lbl.split()[0]
+            ax.set_title(tab_lbl, color=color, fontsize=8, fontweight="bold", pad=4)
+            ax.tick_params(colors=MUTED, labelsize=7)
+            ax.spines[:].set_color(_MPL_GRID)
+            ax.grid(True, color=_MPL_GRID, linewidth=0.4, linestyle="--", alpha=0.5)
+            ax.set_xlabel("t (s)", color=MUTED, fontsize=7)
+            ax.set_ylabel(sym,     color=color,  fontsize=8)
+        # hide 6th subplot (we have 5 series)
+        fig.add_subplot(3, 2, 6).set_visible(False)
+
+        canvas = FigureCanvasTkAgg(fig, master=chart_frame)
+        w = canvas.get_tk_widget()
+        w.configure(bg=_MPL_BG)
+        return fig, w
+
+    # ── build all figures (lazy: build on first click) ────────────────
+    _active_widget = [None]
+
+    def _show_tab(key):
+        if _active_widget[0] is not None:
+            _active_widget[0].pack_forget()
+        if key not in _figures:
+            if key == "__all__":
+                _figures[key] = _make_overview()
+            else:
+                info = next(x for x in _SERIES if x[1] == key)
+                _figures[key] = _make_single_chart(info[0], info[1], info[2], info[3])
+        _, w = _figures[key]
+        w.pack(fill="both", expand=True)
+        _active_widget[0] = w
+        # update tab button highlights
+        for btn_key, btn in _tab_btns.items():
+            is_active = (btn_key == key)
+            btn.config(
+                bg=PURPLE if is_active else CARD,
+                fg=TEXT    if is_active else MUTED,
+                relief="flat"
+            )
+
+    _tab_btns = {}
+
+    # Overview button
+    ov_btn = tk.Button(tab_bar, text="⬡ Overview",
+                       command=lambda: _show_tab("__all__"),
+                       bg=CARD, fg=MUTED, font=F_HEAD,
+                       relief="flat", bd=0, padx=10, pady=6, cursor="hand2")
+    ov_btn.pack(side="left", padx=(8, 2))
+    _tab_btns["__all__"] = ov_btn
+
+    for tab_lbl, ts_key, color, ylabel in _SERIES:
+        short = tab_lbl.split()[0]
+        btn = tk.Button(tab_bar, text=short,
+                        command=lambda k=ts_key: _show_tab(k),
+                        bg=CARD, fg=MUTED, font=F_HEAD,
+                        relief="flat", bd=0, padx=12, pady=6, cursor="hand2")
+        btn.pack(side="left", padx=2)
+        _tab_btns[ts_key] = btn
+
+    # ── close button ──────────────────────────────────────────────────
+    tk.Button(win, text="✕  Close",
               command=win.destroy,
               bg=CARD, fg=TEXT, font=F_HEAD,
               activebackground=BORDER,
-              relief="flat", bd=0, pady=10, cursor="hand2"
-              ).pack(fill="x", pady=(16, 0))
+              relief="flat", bd=0, pady=9, cursor="hand2"
+              ).pack(fill="x", padx=8, pady=(0, 8))
+
+    # default tab
+    _show_tab("__all__")
 
     # centre on parent
     win.update_idletasks()
@@ -397,7 +518,17 @@ def show_results_window(parent, snap, model):
     py = parent.winfo_y()
     ww = win.winfo_width()
     wh = win.winfo_height()
-    win.geometry(f"+{px + (pw - ww)//2}+{py + (ph - wh)//2}")
+    # căn giữa màn hình
+    screen_w = win.winfo_screenwidth()
+    screen_h = win.winfo_screenheight()
+
+    width = 960
+    height = 700
+
+    x = (screen_w - width) // 2
+    y = (screen_h - height) // 2
+
+    win.geometry(f"{width}x{height}+{x}+{y}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -510,7 +641,6 @@ class App(tk.Tk):
             ("W",  "Time/System", "W"),
             ("Wq", "Wait Time",   "Wq"),
         ]
-        self._m_theory = {}
         self._m_emp    = {}
         for col, (sym, desc, key) in enumerate(metric_defs):
             cell = tk.Frame(mc, bg=CARD, padx=8, pady=6)
